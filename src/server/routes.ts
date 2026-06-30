@@ -32,7 +32,18 @@ router.get("/download/:jobId", (req, res) => {
   if (!fs.existsSync(filePath)) {
     return res.status(404).json({ error: "File not found" });
   }
-  res.download(filePath, `quran-video-${jobId}.mp4`);
+  
+  res.setHeader('Content-Disposition', `attachment; filename="quran-video-${jobId}.mp4"`);
+  res.setHeader('Content-Type', 'video/mp4');
+  
+  const readStream = fs.createReadStream(filePath);
+  readStream.pipe(res);
+  readStream.on('error', (err) => {
+    console.error(`Error streaming file ${jobId}:`, err);
+    if (!res.headersSent) {
+      res.status(500).end();
+    }
+  });
 });
 
 router.get("/jobs", (req, res) => {
