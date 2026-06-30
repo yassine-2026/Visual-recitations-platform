@@ -141,8 +141,7 @@ async function processVideo(jobId: string, req: VideoRequest) {
         .inputOptions(['-f', 'concat', '-safe', '0'])
         .outputOptions([
             '-c', 'copy',
-            '-threads', '1',
-            '-thread_queue_size', '512'
+            '-threads', '1'
         ])
         .output(fullAudioPath)
         .on('start', (cmd) => console.log(`[Job ${jobId}] FFmpeg Concat CMD: ${cmd}`)),
@@ -206,8 +205,7 @@ async function processVideo(jobId: string, req: VideoRequest) {
           '-vf', `scale=-2:${req.resolutionHeight},format=yuv420p`,
           '-preset', 'ultrafast',
           '-movflags', '+faststart',
-          '-threads', '1',
-          '-thread_queue_size', '512'
+          '-threads', '1'
         ])
         .output(finalVideoPath)
         .on('start', (cmd) => console.log(`[Job ${jobId}] FFmpeg Merge CMD: ${cmd}`)),
