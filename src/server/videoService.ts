@@ -54,8 +54,16 @@ async function downloadFile(url: string, dest: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const writer = fs.createWriteStream(dest);
     response.data.pipe(writer);
-    writer.on('finish', resolve);
-    writer.on('error', reject);
+    writer.on('finish', () => {
+      writer.close((err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+    writer.on('error', (err) => {
+      writer.close();
+      reject(err);
+    });
   });
 }
 
@@ -104,7 +112,6 @@ async function processVideo(jobId: string, req: VideoRequest) {
       await downloadFile(audioUrl, destFile);
       
       // FFmpeg concat format
-      // Note: escaping backslashes for Windows if necessary, but safe to just use forward slashes
       const safePath = destFile.replace(/\\/g, '/');
       concatContent += `file '${safePath}'\n`;
       audioFiles.push(destFile);
@@ -118,15 +125,27 @@ async function processVideo(jobId: string, req: VideoRequest) {
     const fullAudioPath = path.join(jobTempDir, 'full_audio.mp3');
     
     await new Promise<void>((resolve, reject) => {
+      let concatStderr = '';
       ffmpeg()
         .input(concatFilePath)
-        .inputOptions(['-f concat', '-safe 0'])
-        .outputOptions('-c copy')
+        .inputOptions(['-f', 'concat', '-safe', '0'])
+        .outputOptions(['-c', 'copy'])
         .output(fullAudioPath)
+        .on('start', (cmd) => console.log(`[FFmpeg Concat] ${cmd}`))
+        .on('stderr', (line) => {
+          concatStderr += line + '\n';
+        })
         .on('end', () => resolve())
-        .on('error', (err) => reject(new Error('Audio merge failed: ' + err.message)))
+        .on('error', (err) => {
+          console.error('[FFmpeg Concat Error]', err.message);
+          reject(new Error(`Audio merge failed: ${err.message}\nLogs: ${concatStderr}`));
+        })
         .run();
     });
+
+    if (!fs.existsSync(fullAudioPath) || fs.statSync(fullAudioPath).size === 0) {
+      throw new Error('Generated full audio file is missing or empty.');
+    }
 
     // 3. Fetch Background from Pexels
     job.message = 'Downloading background video...';
@@ -154,39 +173,49 @@ async function processVideo(jobId: string, req: VideoRequest) {
     const bgVideoPath = path.join(jobTempDir, 'bg.mp4');
     await downloadFile(bgUrl, bgVideoPath);
 
+    if (!fs.existsSync(bgVideoPath) || fs.statSync(bgVideoPath).size === 0) {
+      throw new Error('Downloaded background video is missing or empty.');
+    }
+
     // 4. Merge Audio and Video
     job.message = 'Generating final video...';
     job.progress = 70;
     const finalVideoPath = path.join(GENERATED_DIR, `${jobId}.mp4`);
     
-    // Check duration of audio to ensure we loop the video correctly if needed
-    // However, -stream_loop -1 with -shortest handles this automatically
-    
     await new Promise<void>((resolve, reject) => {
+      let mergeStderr = '';
       ffmpeg()
         .input(bgVideoPath)
-        .inputOptions(['-stream_loop -1'])
+        .inputOptions(['-stream_loop', '-1'])
         .input(fullAudioPath)
         .outputOptions([
-          '-map 0:v:0',
-          '-map 1:a:0',
-          '-c:v libx264',
-          '-c:a aac',
-          '-b:a 192k',
-          '-pix_fmt yuv420p',
+          '-map', '0:v:0',
+          '-map', '1:a:0',
+          '-c:v', 'libx264',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          '-pix_fmt', 'yuv420p',
           '-shortest',
-          `-vf scale=trunc(oh*a/2)*2:${req.resolutionHeight},format=yuv420p`,
-          '-preset fast'
+          // Use -2 to automatically calculate width preserving aspect ratio, preventing 'trunc' syntax errors
+          '-vf', `scale=-2:${req.resolutionHeight},format=yuv420p`,
+          '-preset', 'fast'
         ])
         .output(finalVideoPath)
-        .on('progress', (progress) => {
-           // We can track exact progress if we want, but keeping it simple
-           // progress.percent could be used if we know total duration
+        .on('start', (cmd) => console.log(`[FFmpeg Merge] ${cmd}`))
+        .on('stderr', (line) => {
+          mergeStderr += line + '\n';
         })
         .on('end', () => resolve())
-        .on('error', (err) => reject(new Error('Video generation failed: ' + err.message)))
+        .on('error', (err) => {
+          console.error('[FFmpeg Merge Error]', err.message);
+          reject(new Error(`Video generation failed: ${err.message}\nLogs: ${mergeStderr}`));
+        })
         .run();
     });
+
+    if (!fs.existsSync(finalVideoPath) || fs.statSync(finalVideoPath).size === 0) {
+      throw new Error('Final generated video is missing or empty.');
+    }
 
     // 5. Generate Thumbnail
     job.message = 'Creating thumbnail...';
@@ -194,6 +223,7 @@ async function processVideo(jobId: string, req: VideoRequest) {
     const thumbnailPath = path.join(GENERATED_DIR, `${jobId}.jpg`);
     
     await new Promise<void>((resolve, reject) => {
+      let thumbStderr = '';
       ffmpeg(finalVideoPath)
         .screenshots({
           timestamps: ['00:00:01.000'],
@@ -201,8 +231,15 @@ async function processVideo(jobId: string, req: VideoRequest) {
           folder: GENERATED_DIR,
           size: `?x${req.resolutionHeight}`
         })
+        .on('start', (cmd) => console.log(`[FFmpeg Thumb] ${cmd}`))
+        .on('stderr', (line) => {
+          thumbStderr += line + '\n';
+        })
         .on('end', () => resolve())
-        .on('error', (err) => reject(new Error('Thumbnail generation failed: ' + err.message)));
+        .on('error', (err) => {
+          console.error('[FFmpeg Thumb Error]', err.message);
+          reject(new Error(`Thumbnail generation failed: ${err.message}\nLogs: ${thumbStderr}`));
+        });
     });
 
     job.status = 'completed';
