@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { motion } from 'motion/react';
 import { Download, Film, Moon, Play, Sun, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { QuranService } from './services/quranService';
 
 interface Surah {
   number: number;
@@ -64,12 +65,9 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    axios.get('https://api.alquran.cloud/v1/surah').then(res => {
-      setSurahs(res.data.data);
-    }).catch(err => {
-      console.error("Failed to load surahs", err);
-      setError("فشل في تحميل قائمة السور، يرجى المحاولة لاحقاً.");
-    });
+    QuranService.getSurahs()
+      .then(data => setSurahs(data))
+      .catch(err => setError(err.message));
   }, []);
 
   const selectedSurahInfo = surahs.find(s => s.number === surah);

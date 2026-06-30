@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
+import { QuranService } from '../services/quranService';
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 ffmpeg.setFfprobePath(ffprobeInstaller.path);
@@ -97,9 +98,7 @@ async function processVideo(jobId: string, req: VideoRequest) {
     let concatContent = '';
 
     for (let i = req.startAyah; i <= req.endAyah; i++) {
-      const apiUrl = `https://api.alquran.cloud/v1/ayah/${req.surahNumber}:${i}/${req.reciter}`;
-      const response = await axios.get(apiUrl);
-      const audioUrl = response.data.data.audio;
+      const audioUrl = await QuranService.getAyahAudio(req.surahNumber, i, req.reciter);
       
       const destFile = path.join(jobTempDir, `ayah_${i}.mp3`);
       await downloadFile(audioUrl, destFile);
