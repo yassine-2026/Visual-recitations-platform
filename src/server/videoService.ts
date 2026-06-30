@@ -69,6 +69,7 @@ async function downloadFile(url: string, dest: string): Promise<void> {
 
 export async function generateVideo(req: VideoRequest): Promise<JobStatus> {
   const jobId = uuidv4();
+  console.log(`[Job ${jobId}] [1/8] Request received`);
   const job: JobStatus = {
     id: jobId,
     status: 'pending',
@@ -78,8 +79,9 @@ export async function generateVideo(req: VideoRequest): Promise<JobStatus> {
   jobs.set(jobId, job);
 
   // Run asynchronously
-  processVideo(jobId, req).catch(err => {
-    console.error(`Job ${jobId} failed:`, err);
+  processVideoWithTimeout(jobId, req).catch(err => {
+    console.error(`[Job ${jobId}] Execution failed:`);
+    console.error(err.stack || err);
     const failedJob = jobs.get(jobId);
     if (failedJob) {
       failedJob.status = 'failed';
@@ -88,6 +90,26 @@ export async function generateVideo(req: VideoRequest): Promise<JobStatus> {
   });
 
   return job;
+}
+
+async function processVideoWithTimeout(jobId: string, req: VideoRequest) {
+  const timeoutMs = 5 * 60 * 1000; // 5 minutes
+  let timeoutHandle: NodeJS.Timeout;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(new Error(`Operation timed out after 5 minutes.`));
+    }, timeoutMs);
+  });
+
+  try {
+    await Promise.race([
+      processVideo(jobId, req),
+      timeoutPromise
+    ]);
+  } finally {
+    clearTimeout(timeoutHandle!);
+  }
 }
 
 async function processVideo(jobId: string, req: VideoRequest) {
@@ -100,6 +122,7 @@ async function processVideo(jobId: string, req: VideoRequest) {
     job.status = 'processing';
     job.message = 'Fetching Quran audio...';
     job.progress = 10;
+    console.log(`[Job ${jobId}] [2/8] Fetching Quran audio`);
     
     const audioFiles: string[] = [];
     const concatFilePath = path.join(jobTempDir, 'concat.txt');
@@ -107,17 +130,15 @@ async function processVideo(jobId: string, req: VideoRequest) {
 
     for (let i = req.startAyah; i <= req.endAyah; i++) {
       const audioUrl = await QuranService.getAyahAudio(req.surahNumber, i, req.reciter);
-      
       const destFile = path.join(jobTempDir, `ayah_${i}.mp3`);
       await downloadFile(audioUrl, destFile);
-      
-      // FFmpeg concat format
       const safePath = destFile.replace(/\\/g, '/');
       concatContent += `file '${safePath}'\n`;
       audioFiles.push(destFile);
     }
 
     fs.writeFileSync(concatFilePath, concatContent);
+    console.log(`[Job ${jobId}] [3/8] Quran audio downloaded`);
 
     // 2. Concat Audio
     job.message = 'Merging audio files...';
@@ -137,7 +158,6 @@ async function processVideo(jobId: string, req: VideoRequest) {
         })
         .on('end', () => resolve())
         .on('error', (err) => {
-          console.error('[FFmpeg Concat Error]', err.message);
           reject(new Error(`Audio merge failed: ${err.message}\nLogs: ${concatStderr}`));
         })
         .run();
@@ -150,6 +170,7 @@ async function processVideo(jobId: string, req: VideoRequest) {
     // 3. Fetch Background from Pexels
     job.message = 'Downloading background video...';
     job.progress = 50;
+    console.log(`[Job ${jobId}] [4/8] Fetching background`);
 
     const pexelsKey = process.env.PEXELS_API_KEY;
     if (!pexelsKey) {
@@ -164,9 +185,7 @@ async function processVideo(jobId: string, req: VideoRequest) {
       throw new Error('No backgrounds found for the requested topic.');
     }
 
-    // Pick a random video from top 5
     const randomVideo = pexelsResponse.data.videos[Math.floor(Math.random() * pexelsResponse.data.videos.length)];
-    // Get best quality link (preferably HD)
     const videoFiles = randomVideo.video_files.sort((a: any, b: any) => (b.width * b.height) - (a.width * a.height));
     const bgUrl = videoFiles[0].link;
     
@@ -176,10 +195,12 @@ async function processVideo(jobId: string, req: VideoRequest) {
     if (!fs.existsSync(bgVideoPath) || fs.statSync(bgVideoPath).size === 0) {
       throw new Error('Downloaded background video is missing or empty.');
     }
+    console.log(`[Job ${jobId}] [5/8] Background downloaded`);
 
     // 4. Merge Audio and Video
     job.message = 'Generating final video...';
     job.progress = 70;
+    console.log(`[Job ${jobId}] [6/8] Starting FFmpeg`);
     const finalVideoPath = path.join(GENERATED_DIR, `${jobId}.mp4`);
     
     await new Promise<void>((resolve, reject) => {
@@ -196,18 +217,16 @@ async function processVideo(jobId: string, req: VideoRequest) {
           '-b:a', '192k',
           '-pix_fmt', 'yuv420p',
           '-shortest',
-          // Use -2 to automatically calculate width preserving aspect ratio, preventing 'trunc' syntax errors
           '-vf', `scale=-2:${req.resolutionHeight},format=yuv420p`,
           '-preset', 'fast'
         ])
         .output(finalVideoPath)
-        .on('start', (cmd) => console.log(`[FFmpeg Merge] ${cmd}`))
+        .on('start', (cmd) => console.log(`[Job ${jobId}] FFmpeg Merge CMD: ${cmd}`))
         .on('stderr', (line) => {
           mergeStderr += line + '\n';
         })
         .on('end', () => resolve())
         .on('error', (err) => {
-          console.error('[FFmpeg Merge Error]', err.message);
           reject(new Error(`Video generation failed: ${err.message}\nLogs: ${mergeStderr}`));
         })
         .run();
@@ -216,6 +235,7 @@ async function processVideo(jobId: string, req: VideoRequest) {
     if (!fs.existsSync(finalVideoPath) || fs.statSync(finalVideoPath).size === 0) {
       throw new Error('Final generated video is missing or empty.');
     }
+    console.log(`[Job ${jobId}] [7/8] FFmpeg finished`);
 
     // 5. Generate Thumbnail
     job.message = 'Creating thumbnail...';
@@ -231,13 +251,12 @@ async function processVideo(jobId: string, req: VideoRequest) {
           folder: GENERATED_DIR,
           size: `?x${req.resolutionHeight}`
         })
-        .on('start', (cmd) => console.log(`[FFmpeg Thumb] ${cmd}`))
+        .on('start', (cmd) => console.log(`[Job ${jobId}] FFmpeg Thumb CMD: ${cmd}`))
         .on('stderr', (line) => {
           thumbStderr += line + '\n';
         })
         .on('end', () => resolve())
         .on('error', (err) => {
-          console.error('[FFmpeg Thumb Error]', err.message);
           reject(new Error(`Thumbnail generation failed: ${err.message}\nLogs: ${thumbStderr}`));
         });
     });
@@ -247,11 +266,16 @@ async function processVideo(jobId: string, req: VideoRequest) {
     job.message = 'Video created successfully!';
     job.videoUrl = `/outputs/${jobId}.mp4`;
     job.thumbnailUrl = `/outputs/${jobId}.jpg`;
-
-    // Cleanup temp
-    fs.rmSync(jobTempDir, { recursive: true, force: true });
+    console.log(`[Job ${jobId}] [8/8] Returning MP4`);
 
   } catch (error: any) {
     throw error;
+  } finally {
+    // Cleanup temp
+    try {
+      fs.rmSync(jobTempDir, { recursive: true, force: true });
+    } catch (cleanupErr) {
+      console.error(`[Job ${jobId}] Failed to cleanup temp dir:`, cleanupErr);
+    }
   }
 }
