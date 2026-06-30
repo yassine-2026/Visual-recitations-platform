@@ -50,13 +50,23 @@ async function downloadFileStream(url: string, dest: string, signal: AbortSignal
     url,
     method: 'GET',
     responseType: 'stream',
-    signal
+    signal,
+    timeout: 30000 // 30 seconds for download
   });
   
   await pipeline(response.data, fs.createWriteStream(dest), { signal });
 }
 
 export async function generateVideo(req: VideoRequest): Promise<JobStatus> {
+  if (!ffmpegInstaller.path || !ffprobeInstaller.path) {
+    throw new Error('الخادم غير قادر على معالجة الفيديوهات حالياً بسبب خطأ داخلي (FFmpeg غير متوفر).');
+  }
+
+  const activeJobs = Array.from(jobs.values()).filter(j => j.status === 'pending' || j.status === 'processing');
+  if (activeJobs.length >= 1) {
+    throw new Error('الخادم يقوم حالياً بمعالجة فيديو آخر. يرجى الانتظار حتى ينتهي.');
+  }
+
   const jobId = uuidv4();
   console.log(`[Job ${jobId}] [1/10] Request received`);
   const job: JobStatus = {
@@ -165,7 +175,8 @@ async function processVideo(jobId: string, req: VideoRequest) {
 
     const pexelsResponse = await axios.get(`https://api.pexels.com/videos/search?query=${encodeURIComponent(req.bgType)}&per_page=5&orientation=landscape`, {
       headers: { Authorization: pexelsKey },
-      signal
+      signal,
+      timeout: 10000 // 10 seconds timeout for Pexels search
     });
 
     if (!pexelsResponse.data.videos || pexelsResponse.data.videos.length === 0) {
@@ -280,6 +291,7 @@ function runFfmpegCommand(
     let stderrLog = '';
     
     const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
       cmd.kill('SIGKILL');
       reject(signal.reason || new Error('Aborted'));
     };
